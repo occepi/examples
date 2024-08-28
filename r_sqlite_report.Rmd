@@ -1,0 +1,100 @@
+---
+title: "R SQLite database analysis"
+author: "Stella Beckman"
+date: "2024-08-27"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+library(DBI)
+library(gtsummary)
+library(flextable)
+
+# open connection to your database
+# assumes this .Rmd file is saved in the same directory as the database
+conn <- dbConnect(RSQLite::SQLite(), 
+                  paste0(getwd(), "test.db")
+                  )
+
+total_days <- paste(dbGetQuery(conn, "SELECT COUNT(*) FROM test_table;"))
+
+total_injuries <- paste(dbGetQuery(conn, "SELECT SUM(injury_count) FROM test_table;"))
+
+# Using LTRIM and STRFTIME to extract number of month without leading zero
+# note that quotes inside SQL statements must be escaped with "\"
+injuries_per_month <- dbGetQuery(conn, "SELECT 
+                                        LTRIM(STRFTIME('%m', date_recorded), \"0\") month,
+                                        COUNT(*) n_days,
+                                        SUM(injury_count) total_injuries
+                                        FROM test_table
+                                        GROUP BY month
+                                        ORDER BY month ASC;"
+)
+
+# replace month with month name
+injuries_per_month$month <- month.abb[as.integer(injuries_per_month$month)]
+
+# we have determined a priori that items_shipped, hcp_id, and injury_count 
+# will be used for modeling
+model_data <- dbGetQuery(conn,
+                 "SELECT
+                 LTRIM(STRFTIME('%m', date_recorded), \"0\") month,
+                 items_shipped, 
+                 injury_count 
+                 FROM test_table;")
+
+# replace month with name & order months 
+model_data$month <- factor((month.abb[as.integer(model_data$month)]),
+                           levels = c("Jan", "Feb", "Mar", "Apr")
+                           )
+
+# can also put the dbGetQuery() after the data = argument but I am not sure
+# if there is a benefit to that?
+model <- glm(data = model_data, 
+             injury_count ~ I(items_shipped/10) + month,
+             family = "poisson"
+             )
+
+items_shipped_coef <- sprintf("%.2f", exp(model$coefficients[2]))
+
+items_shipped_ci <- paste0(sprintf("%.2f", exp(confint(model))[2,1]),
+                           ", ",
+                           sprintf("%.2f", exp(confint(model))[2,2]))
+
+```
+
+## Introduction
+
+This report is an extremely simple example of using an SQLite database to assist in generating an R Markdown report. 
+
+## Methods
+
+I simulated some data, and used Poisson regression to estimate the incidence rate ratio of injuries. I have determined *a priori* that month may be a confounder of the association between items shipped and number of injuries.
+
+## Results
+
+In total, `r paste(total_days)` days of data were recorded, with a total of `r paste(total_injuries)` injuries during the study period. Table 1 shows the number of injuries recorded per month; note that `r paste(tail(injuries_per_month$month, n = 1))` is incomplete, with `r tail(injuries_per_month$n_days, n = 1)` days of data. 
+
+```{r tab.cap = "Table 1. Month, number of days of data recorded in month, and total injuries in month"}
+injuries_per_month %>% 
+  flextable() %>% 
+  set_header_labels(values = c(month = "Month",
+                               n_days = "Number of Days",
+                               total_injuries = "Total Injuries")
+  )
+```
+
+There is a modest, though not statistically significant, association between items shipped and injuries, with an incidence rate ratio of `r items_shipped_coef` (95% CI: `r items_shipped_ci`). Month is not associated with the count of injuries (Table 2). 
+
+```{r tab.cap = "Table 2. Incidence rate ratio for 10-unit increase in items shipped and month"}
+model %>% 
+  tbl_regression(exponentiate = TRUE,
+                 label = c('I(items_shipped/10)' ~ "Increase of 10 items shipped",
+                           'month' ~ "Month"))
+
+```
+
+## Discussion
+
+Because this is simulated data, we know that the number of injuries is associated with the total items shipped per day. However, with only 100 observations, it is to be expected that the association between total items shipped and injuries is not strong. 
